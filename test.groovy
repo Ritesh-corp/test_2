@@ -1,108 +1,75 @@
 pipeline {
-  agent any
+    agent any
 
-  // ──────────────────────────────────────────────────────────────────────────────
-  // GitHub Webhook (Push & Pull‑Request)
-  //   Payload URL:  https://<jenkins>/github-webhook/?token=github-webhook
-  //   Secret:       github-webhook
-  //   Events:       Pushes & Pull requests
-  // ──────────────────────────────────────────────────────────────────────────────
-
-  options {
-    disableConcurrentBuilds()
-    skipDefaultCheckout()
-  }
-
-  triggers {
-    GenericTrigger(
-      printContributedVariables: true,
-      printPostContent:     true,       // raw JSON in env.GENERIC_PAYLOAD
-      silentResponse:       false,      // show response in logs
-      token: 'github-webhook',          // match your webhook secret
-
-      // capture fields you need for BOTH push & PR events:
-      genericVariables: [
-        // push fields
-        [ key: 'ref',        value: '$.ref' ],
-        [ key: 'before',     value: '$.before' ],
-        [ key: 'after',      value: '$.after' ],
-        [ key: 'repository', value: '$.repository.full_name' ],
-        [ key: 'pusher',     value: '$.pusher.name' ],
-
-        // pull‑request fields
-        [ key: 'action',     value: '$.action' ],
-        [ key: 'pr_number',  value: '$.pull_request.number' ],
-        [ key: 'pr_title',   value: '$.pull_request.title' ],
-        [ key: 'pr_url',     value: '$.pull_request.html_url' ],
-        [ key: 'pr_user',    value: '$.pull_request.user.login' ],
-        [ key: 'base_branch',value: '$.pull_request.base.ref' ],
-        [ key: 'head_branch',value: '$.pull_request.head.ref' ]
-      ],
-
-      // allow either PR actions OR push refs
-      regexpFilterText: '$action$ref',
-      regexpFilterExpression: '^(opened|synchronize|reopened)|(refs/heads/.+)$',
-      causeString: 'Triggered by $action on PR #$pr_number'
-    )
-  }
-
-  stages {
-    stage('Debug Info') {
-      steps {
-        script {
-          echo "=== ENVIRONMENT VARIABLES ==="
-          sh 'env | sort'
-          
-          echo "=== WEBHOOK PAYLOAD ==="
-          if (env.GENERIC_PAYLOAD) {
-            echo env.GENERIC_PAYLOAD
-            writeFile file: 'webhook-payload.json', text: env.GENERIC_PAYLOAD
-          } else {
-            echo "No webhook payload detected"
-          }
-        }
-      }
+    environment {
+        // Name of the Conda env
+        CONDA_ENV = 'pr_an_py312'
+        // Path to conda.sh—adjust if your install is elsewhere
+        CONDA_INIT = "${HOME}/miniconda3/etc/profile.d/conda.sh"
     }
 
-    stage('Handle Webhook') {
-      steps {
-        script {
-          // always print & save the raw payload
-          echo "=== RAW PAYLOAD ==="
-          echo env.GENERIC_PAYLOAD
-          writeFile file: 'payload.json', text: env.GENERIC_PAYLOAD
-
-          if (env.action) {
-            // === PULL REQUEST ===
-            echo "→ Pull‑Request event: ${env.action}"
-            echo "#${env.pr_number}: ${env.pr_title} by ${env.pr_user}"
-            echo "Base: ${env.base_branch} ← Head: ${env.head_branch}"
-            writeFile file: 'pr-info.txt', text: """
-              Action:       ${env.action}
-              PR Number:    ${env.pr_number}
-              Title:        ${env.pr_title}
-              URL:          ${env.pr_url}
-              Author:       ${env.pr_user}
-              Base Branch:  ${env.base_branch}
-              Head Branch:  ${env.head_branch}
-            """.stripIndent()
-          } else {
-            // === PUSH ===
-            echo "→ Push to ${env.repository}"
-            echo "Ref:    ${env.ref}"
-            echo "Before: ${env.before}"
-            echo "After:  ${env.after}"
-            echo "Pusher: ${env.pusher}"
-            writeFile file: 'push-info.txt', text: """
-              Repository:   ${env.repository}
-              Ref:          ${env.ref}
-              Before SHA:   ${env.before}
-              After SHA:    ${env.after}
-              Pusher:       ${env.pusher}
-            """.stripIndent()
-          }
-        }
-      }
+    parameters {
+        string(name: 'PR_NUMBER', defaultValue: '', description: 'Pull Request Number from webhook')
+        string(name: 'PR_URL',    defaultValue: '', description: 'Pull Request URL from webhook')
+        string(name: 'GITHUB_TOKEN', defaultValue: '', description: 'GitHub Personal Access Token')
     }
-  }
+
+    stages {
+        stage('Clone Analysis Repo (repo2)') {
+            steps {
+                git(
+                  url:           'https://github.com/Ritesh-corp/PR_analyser.git',
+                  branch:        'main'
+                )
+            }
+        }
+
+        stage('Set Up Conda Environment') {
+            steps {
+                sh """
+                  # Initialize conda
+                  source "${CONDA_INIT}"
+                  # Create env if it doesn't already exist
+                  if ! conda info --envs | grep -q "^${CONDA_ENV}\\s"; then
+                    conda create -y -n ${CONDA_ENV} python=3.12
+                  fi
+                  # Activate and install deps
+                  conda activate ${CONDA_ENV}
+                  pip install --upgrade pip
+                  pip install -r requirements.txt
+                  pip install -e .
+                """
+            }
+        }
+
+        stage('Run Impact Analysis') {
+            steps {
+                script {
+                    if (!params.PR_NUMBER) {
+                        error("Missing required parameter: PR_NUMBER")
+                    }
+                    def prUrl = params.PR_URL ?: "https://github.com/Ritesh-corp/test_ado/pull/${params.PR_NUMBER}"
+                    echo "Analyzing PR: ${prUrl}"
+
+                    sh """
+                      source "${CONDA_INIT}"
+                      conda activate ${CONDA_ENV}
+                      python tests/analyze_pr.py "${prUrl}" "${params.GITHUB_TOKEN}" > analysis_output.json
+                    """
+                }
+            }
+        }
+
+        stage('Archive Results') {
+            steps {
+                archiveArtifacts artifacts: 'analysis_output.json', fingerprint: true
+            }
+        }
+    }
+
+    post {
+        success { echo "✅ Impact analysis completed." }
+        failure { echo "❌ Impact analysis failed."  }
+        always  { cleanWs() }
+    }
 }
