@@ -106,7 +106,7 @@ pipeline {
                     $class: 'GitSCM',
                     branches: [[ name: 'main' ]],
                     userRemoteConfigs: [[
-                        url:           'https://github.com/Ritesh-corp/PR_analyser_v3',
+                        url:           'https://github.com/Ritesh-corp/PR_anlayser',
                         credentialsId: 'Ritesh-corp'
                     ]]
                 ])
